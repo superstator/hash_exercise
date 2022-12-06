@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex};
 
 type MapEntry<T> = Vec<(String, T, Option<(Instant, Duration)>)>;
 
@@ -9,12 +11,13 @@ type MapEntry<T> = Vec<(String, T, Option<(Instant, Duration)>)>;
 /// [N] controls the size of the internal map structure, and is a compile-time
 /// constant. A larger [N] will allow faster lookups for large sets, at the expense
 /// of higher initial memory usage.
-pub struct MiniMap<const N: usize, T> {
-    pub(crate) map: [MapEntry<T>; N]
+#[derive(Clone)]
+pub struct MiniMap<const N: usize, T: Clone> {
+    pub(crate) map: Arc<Mutex<[MapEntry<T>; N]>>
 }
-impl<const N: usize, T> MiniMap<N, T> {
+impl<const N: usize, T: Clone> MiniMap<N, T> {
     pub fn new() -> MiniMap<N, T> {
-        MiniMap { map: [(); N].map(|_| Vec::new()) }
+        MiniMap { map: Arc::new(Mutex::new([(); N].map(|_| Vec::new()))) }
     }
 
     fn hash(key: &str) -> usize {
@@ -28,7 +31,8 @@ impl<const N: usize, T> MiniMap<N, T> {
     pub fn insert(&mut self, key: &str, value: T, ttl: Option<Duration>) {
         // hash the key and find the corresponding slot in our map
         let idx = Self::hash(key);
-        let slot: &mut MapEntry<T> = &mut self.map[idx];
+        let mut map = (*self.map).lock().unwrap();
+        let slot: &mut MapEntry<T> = &mut (*map)[idx];
 
         let expiration = ttl.map(|d| (Instant::now(), d));
 
@@ -43,10 +47,11 @@ impl<const N: usize, T> MiniMap<N, T> {
     /// Get the item at the given key, if it exists and is not expired.
     /// If an item exists and IS expired, None will be returned, but the
     /// item will not be permanently lost until [expire()] is called.
-    pub fn get(&self, key: &str) -> Option<(&T, Option<Duration>)> {
+    pub fn get(&self, key: &str) -> Option<(T, Option<Duration>)> {
         // hash the key and find the corresponding slot in our map
         let idx = Self::hash(key);
-        let slot: &MapEntry<T> = &self.map[idx];
+        let map = (*self.map).lock().unwrap();
+        let slot: &MapEntry<T> = &(*map)[idx];
 
         // find and return a ref to the item
         let item = slot.iter().find(|i| i.0 == key);
@@ -56,7 +61,7 @@ impl<const N: usize, T> MiniMap<N, T> {
                 if let Some((stamp, duration)) = i.2 {
                     if stamp.elapsed() > duration { return None; }
                 }
-                Some((&i.1, i.2.map(|d| d.1 - d.0.elapsed())))
+                Some((i.1.clone(), i.2.map(|d| d.1 - d.0.elapsed())))
             },
         }
     }
@@ -66,7 +71,8 @@ impl<const N: usize, T> MiniMap<N, T> {
     pub fn remove(&mut self, key: &str) -> Option<T> {
         // hash the key and find the corresponding slot in our map
         let idx = Self::hash(key);
-        let slot: &mut MapEntry<T> = &mut self.map[idx];
+        let mut map = (*self.map).lock().unwrap();
+        let slot: &mut MapEntry<T> = &mut (*map)[idx];
 
         // find and remove the item
         let item = slot.iter().position(|i| i.0 == key);
@@ -79,10 +85,13 @@ impl<const N: usize, T> MiniMap<N, T> {
     /// Checks the expiration status of all keys, and permanently removes any expired items. A count
     /// of expired items is returned.
     pub fn expire(&mut self) -> usize {
-        let expired: Vec<String> = self.map.iter_mut().flatten().filter(|i| i.2.is_some()).filter_map(|i| {
+        let mut map = (*self.map).lock().unwrap();
+
+        let expired: Vec<String> = map.iter_mut().flatten().filter(|i| i.2.is_some()).filter_map(|i| {
             let stamp = i.2.unwrap();
             if stamp.0.elapsed() > stamp.1 { Some(i.0.clone()) } else { None }
         }).collect();
+        drop(map);
 
         for key in &expired {
             self.remove(key);
@@ -92,7 +101,8 @@ impl<const N: usize, T> MiniMap<N, T> {
 
     /// Returns the total number of keys in the map, ignoring expiration status.
     pub fn len(&self) -> usize {
-        self.map.iter().map(|i| i.len()).sum()
+        let mut map = (*self.map).lock().unwrap();
+        (*map).iter().map(|i| i.len()).sum()
     }
 }
 
@@ -117,7 +127,7 @@ mod tests {
         map.insert("baz", "3".to_string(), None);
 
         // first three keys above happen to have odd hashes, so they all end up in the second bucket
-        assert_eq!(3, map.map[1].len());
+        assert_eq!(3, map.map.deref().lock().unwrap().deref()[1].len());
     }
 
     #[test]
@@ -154,5 +164,19 @@ mod tests {
 
         assert_eq!(1, map.expire());
         assert_eq!(0, map.len());
+    }
+
+    #[test]
+    fn can_insert_threaded() {
+        let map: MiniMap<128, String> = MiniMap::new();
+
+        let mut map1 = map.clone();
+        let mut map2 = map.clone();
+        let t2 = std::thread::spawn(move || { map2.insert("b","t2".to_string(), None);});
+        let t1 = std::thread::spawn(move || { map1.insert("a","t1".to_string(), None);});
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        assert_eq!(2, map.len());
     }
 }
