@@ -114,6 +114,7 @@ mod tests {
     use super::*;
     use std::ops::Deref;
 
+    /// Insert and verify a single value in a new map
     #[test]
     fn can_insert_new() {
         let mut map: MiniMap<128, String> = MiniMap::new();
@@ -122,6 +123,7 @@ mod tests {
         assert_eq!("bar", map.get("foo").unwrap().0);
     }
 
+    /// Insert and verify multiple values with colliding hashes
     #[test]
     fn can_insert_with_collision() {
         // very small hash size to maximize possibility of collision
@@ -134,6 +136,7 @@ mod tests {
         assert_eq!(3, map.map.deref().lock().unwrap().deref()[1].len());
     }
 
+    /// Insert and retrieve a value
     #[test]
     fn can_get() {
         let mut map: MiniMap<128, String> = MiniMap::new();
@@ -143,6 +146,7 @@ mod tests {
         assert_eq!("bat", map.get("baz").unwrap().0);
     }
 
+    /// Insert and then delete a value
     #[test]
     fn can_remove() {
         let mut map: MiniMap<128, String> = MiniMap::new();
@@ -154,6 +158,7 @@ mod tests {
         assert_eq!(None, map.get("baz"));
     }
 
+    /// Insert an item with expiration, and verify soft and hard expiration
     #[test]
     fn can_expire() {
         let mut map: MiniMap<128, String> = MiniMap::new();
@@ -163,13 +168,16 @@ mod tests {
         assert_eq!(1, map.key_count());
 
         std::thread::sleep(Duration::from_millis(2));
+        // item is now "soft" expired, meaning it's still in the map but we can't get it
         assert_eq!(None, map.get("foo"));
         assert_eq!(1, map.key_count());
 
         assert_eq!(1, map.expire());
+        // item is now "hard" expired and removed from the map
         assert_eq!(0, map.key_count());
     }
 
+    // Can insert items from two separate threads, and then verify from the parent thread
     #[test]
     fn can_insert_threaded() {
         let map: MiniMap<128, String> = MiniMap::new();
@@ -190,17 +198,19 @@ mod tests {
         use crate::MiniMap;
         use rand::RngCore;
 
+        /// Insert 10m random values, and check worst case fetch times
         #[test]
         fn can_meet_perf_goals() {
             let mut map: MiniMap<100000, String> = MiniMap::new();
 
-            for _ in 0..10_000_000 {
-                map.insert(&get_int_id::<3>(i).unwrap(),get_random_id::<32>(), None);
+            // insert test dataset
+            for i in 0..10_000_000 {
+                map.insert(&get_int_id::<3>(i).unwrap(), get_random_id::<32>(), None);
             }
 
             let mut times: Vec<u128> = vec![];
             // probe for random keys and record performance
-            for i in 0..10 {
+            for i in 0..1000 {
                 let v = get_random_id::<3>();
                 let s = Instant::now();
                 let r = map.get(&v);
@@ -208,6 +218,7 @@ mod tests {
                 times.push(e);
             }
 
+            // assert that the worst time recorded is <1ms (1m nanoseconds)
             assert!(times.iter().max().unwrap() < &1_000_000u128)
         }
 
