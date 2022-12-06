@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 
 type MapEntry<T> = Vec<(String, T, Option<(Instant, Duration)>)>;
@@ -14,6 +13,11 @@ type MapEntry<T> = Vec<(String, T, Option<(Instant, Duration)>)>;
 #[derive(Clone)]
 pub struct MiniMap<const N: usize, T: Clone> {
     pub(crate) map: Arc<Mutex<Vec<MapEntry<T>>>>
+}
+impl<const N: usize, T: Clone> Default for MiniMap<N, T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 impl<const N: usize, T: Clone> MiniMap<N, T> {
     pub fn new() -> MiniMap<N, T> {
@@ -44,32 +48,6 @@ impl<const N: usize, T: Clone> MiniMap<N, T> {
             Some(i) => i.1 = value,
             None => slot.push((key.to_string(), value, expiration))
         }
-    }
-
-    /// Insert or replace an item at the given key. An optional [ttl]
-    /// may be set to control expiration of an item.
-    pub fn insert_many(&mut self, keys: &[&str], values: &[T], ttl: Option<Duration>) -> Result<(), String> {
-        if keys.len() != values.len() { return Err("Must supply same number of keys and values".to_string()); }
-
-        // get a lock up front and reuse it for all inserts
-        let mut map = (*self.map).lock().unwrap();
-
-        for (i, key) in keys.iter().enumerate() {
-            // hash the key and find the corresponding slot in our map
-            let idx = Self::hash(key);
-            let slot: &mut MapEntry<T> = &mut (*map)[idx];
-
-            let expiration = ttl.map(|d| (Instant::now(), d));
-
-            // find and update the value, or insert a new entry
-            let item = slot.iter_mut().find(|i| i.0 == *key);
-            match item {
-                Some(item) => item.1 = values[i].clone(),
-                None => slot.push((key.to_string(), values[i].clone(), expiration))
-            }
-        }
-
-        Ok(())
     }
 
     /// Get the item at the given key, if it exists and is not expired.
@@ -104,10 +82,7 @@ impl<const N: usize, T: Clone> MiniMap<N, T> {
 
         // find and remove the item
         let item = slot.iter().position(|i| i.0 == key);
-        match item {
-            Some(i) => Some(slot.remove(i).1),
-            None => None
-        }
+        item.map(|i| slot.remove(i).1)
     }
 
     /// Checks the expiration status of all keys, and permanently removes any expired items. A count
@@ -128,8 +103,8 @@ impl<const N: usize, T: Clone> MiniMap<N, T> {
     }
 
     /// Returns the total number of keys in the map, ignoring expiration status.
-    pub fn len(&self) -> usize {
-        let mut map = (*self.map).lock().unwrap();
+    pub fn key_count(&self) -> usize {
+        let map = (*self.map).lock().unwrap();
         (*map).iter().map(|i| i.len()).sum()
     }
 }
@@ -137,6 +112,7 @@ impl<const N: usize, T: Clone> MiniMap<N, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Deref;
 
     #[test]
     fn can_insert_new() {
@@ -184,14 +160,14 @@ mod tests {
         map.insert("foo", "bar".to_string(), Some(Duration::from_millis(1)));
 
         assert_eq!("bar", map.get("foo").unwrap().0);
-        assert_eq!(1, map.len());
+        assert_eq!(1, map.key_count());
 
         std::thread::sleep(Duration::from_millis(2));
         assert_eq!(None, map.get("foo"));
-        assert_eq!(1, map.len());
+        assert_eq!(1, map.key_count());
 
         assert_eq!(1, map.expire());
-        assert_eq!(0, map.len());
+        assert_eq!(0, map.key_count());
     }
 
     #[test]
@@ -205,7 +181,7 @@ mod tests {
         t1.join().unwrap();
         t2.join().unwrap();
 
-        assert_eq!(2, map.len());
+        assert_eq!(2, map.key_count());
     }
 
     #[cfg(feature = "perf_test")]
@@ -217,16 +193,10 @@ mod tests {
         #[test]
         fn can_meet_perf_goals() {
             let mut map: MiniMap<100000, String> = MiniMap::new();
-            let mut keys = vec![];
-            let mut values = vec![];
 
-
-            for i in 0..10_000_000 {
-                keys.push(get_int_id::<3>(i).unwrap());
-                values.push(get_random_id::<32>());
+            for _ in 0..10_000_000 {
+                map.insert(&get_int_id::<3>(i).unwrap(),get_random_id::<32>(), None);
             }
-            let key_slices: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
-            map.insert_many(key_slices.as_slice(), &values, None);
 
             let mut times: Vec<u128> = vec![];
             // probe for random keys and record performance
