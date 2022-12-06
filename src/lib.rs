@@ -13,11 +13,13 @@ type MapEntry<T> = Vec<(String, T, Option<(Instant, Duration)>)>;
 /// of higher initial memory usage.
 #[derive(Clone)]
 pub struct MiniMap<const N: usize, T: Clone> {
-    pub(crate) map: Arc<Mutex<[MapEntry<T>; N]>>
+    pub(crate) map: Arc<Mutex<Vec<MapEntry<T>>>>
 }
 impl<const N: usize, T: Clone> MiniMap<N, T> {
     pub fn new() -> MiniMap<N, T> {
-        MiniMap { map: Arc::new(Mutex::new([(); N].map(|_| Vec::new()))) }
+        let mut map: Vec<MapEntry<T>> = Vec::with_capacity(N);
+        for _ in 0..N { map.push(vec![]); }
+        MiniMap { map: Arc::new(Mutex::new(map)) }
     }
 
     fn hash(key: &str) -> usize {
@@ -42,6 +44,32 @@ impl<const N: usize, T: Clone> MiniMap<N, T> {
             Some(i) => i.1 = value,
             None => slot.push((key.to_string(), value, expiration))
         }
+    }
+
+    /// Insert or replace an item at the given key. An optional [ttl]
+    /// may be set to control expiration of an item.
+    pub fn insert_many(&mut self, keys: &[&str], values: &[T], ttl: Option<Duration>) -> Result<(), String> {
+        if keys.len() != values.len() { return Err("Must supply same number of keys and values".to_string()); }
+
+        // get a lock up front and reuse it for all inserts
+        let mut map = (*self.map).lock().unwrap();
+
+        for (i, key) in keys.iter().enumerate() {
+            // hash the key and find the corresponding slot in our map
+            let idx = Self::hash(key);
+            let slot: &mut MapEntry<T> = &mut (*map)[idx];
+
+            let expiration = ttl.map(|d| (Instant::now(), d));
+
+            // find and update the value, or insert a new entry
+            let item = slot.iter_mut().find(|i| i.0 == *key);
+            match item {
+                Some(item) => item.1 = values[i].clone(),
+                None => slot.push((key.to_string(), values[i].clone(), expiration))
+            }
+        }
+
+        Ok(())
     }
 
     /// Get the item at the given key, if it exists and is not expired.
@@ -178,5 +206,56 @@ mod tests {
         t2.join().unwrap();
 
         assert_eq!(2, map.len());
+    }
+
+    #[cfg(feature = "perf_test")]
+    mod perf_tests {
+        use std::time::Instant;
+        use crate::MiniMap;
+        use rand::RngCore;
+
+        #[test]
+        fn can_meet_perf_goals() {
+            let mut map: MiniMap<100000, String> = MiniMap::new();
+            let mut keys = vec![];
+            let mut values = vec![];
+
+
+            for i in 0..10_000_000 {
+                keys.push(get_int_id::<3>(i).unwrap());
+                values.push(get_random_id::<32>());
+            }
+            let key_slices: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+            map.insert_many(key_slices.as_slice(), &values, None);
+
+            let mut times: Vec<u128> = vec![];
+            // probe for random keys and record performance
+            for i in 0..10 {
+                let v = get_random_id::<3>();
+                let s = Instant::now();
+                let r = map.get(&v);
+                let e = s.elapsed().as_nanos();
+                times.push(e);
+            }
+
+            assert!(times.iter().max().unwrap() < &1_000_000u128)
+        }
+
+        /// Returns a random hex string of N bytes
+        fn get_random_id<const N: usize>() -> String {
+            let mut rng = rand::thread_rng();
+            let mut id = [0u8; N];
+            rng.fill_bytes(id.as_mut_slice());
+            hex::encode(id)
+        }
+
+        /// Returns the given integer [id] as a hex value with [N] bytes, or an error if
+        /// [id] would overflow [N]
+        fn get_int_id<const N: usize>(id: usize) -> Result<String, usize> {
+            match id > 2usize.pow(N as u32 * 8) {
+                true => Err(id),
+                false => Ok(hex::encode(id.to_le_bytes())[0..N*2].to_string())
+            }
+        }
     }
 }
